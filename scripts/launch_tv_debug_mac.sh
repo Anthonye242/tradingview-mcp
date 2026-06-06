@@ -43,13 +43,17 @@ if [ -z "$APP" ] || [ ! -f "$APP" ]; then
   exit 1
 fi
 
+# VS Code sets ELECTRON_RUN_AS_NODE=1 which makes Electron behave as plain Node.js
+# and reject --remote-debugging-port. Always clear it before launching.
+unset ELECTRON_RUN_AS_NODE
+
 # Kill any existing TradingView
 pkill -f "TradingView" 2>/dev/null
 sleep 1
 
 echo "Found TradingView at: $APP"
 echo "Launching with --remote-debugging-port=$PORT ..."
-"$APP" --remote-debugging-port=$PORT &
+env -u ELECTRON_RUN_AS_NODE "$APP" --remote-debugging-port=$PORT &
 TV_PID=$!
 echo "PID: $TV_PID"
 

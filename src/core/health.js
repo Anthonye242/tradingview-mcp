@@ -219,7 +219,12 @@ export async function launch({ port, kill_existing } = {}) {
     } catch { /* may not be running */ }
   }
 
-  const child = spawn(tvPath, [`--remote-debugging-port=${cdpPort}`], { detached: true, stdio: 'ignore' });
+  // Strip ELECTRON_RUN_AS_NODE — VS Code sets it to 1, which makes Electron run as
+  // plain Node.js and reject --remote-debugging-port as an unknown flag.
+  const cleanEnv = { ...process.env };
+  delete cleanEnv.ELECTRON_RUN_AS_NODE;
+
+  const child = spawn(tvPath, [`--remote-debugging-port=${cdpPort}`], { detached: true, stdio: 'ignore', env: cleanEnv });
   child.unref();
 
   for (let i = 0; i < 15; i++) {
