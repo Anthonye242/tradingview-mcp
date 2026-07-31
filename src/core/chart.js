@@ -3,6 +3,11 @@
  */
 import { evaluate as _evaluate, evaluateAsync as _evaluateAsync, safeString, requireFinite } from '../connection.js';
 import { waitForChartReady as _waitForChartReady } from '../wait.js';
+import { readFileSync, existsSync } from 'fs';
+import { resolve as resolvePath, dirname } from 'path';
+import { fileURLToPath } from 'url';
+
+const AUTOLOAD_CONFIG = resolvePath(dirname(fileURLToPath(import.meta.url)), '../../autoload.json');
 
 const CHART_API = 'window.TradingViewApi._activeChartWidgetWV.value()';
 
@@ -49,7 +54,23 @@ export async function setSymbol({ symbol, _deps }) {
     })()
   `);
   const ready = await waitForChartReady(symbol);
-  return { success: true, symbol, chart_ready: ready };
+
+  // Re-inject Pine scripts listed in autoload.json after every symbol switch
+  let autoloaded_pine = 0;
+  if (existsSync(AUTOLOAD_CONFIG)) {
+    const { ensurePineEditorOpen, setSource, smartCompile } = await import('./pine.js');
+    const { pine_scripts = [] } = JSON.parse(readFileSync(AUTOLOAD_CONFIG, 'utf8'));
+    for (const scriptPath of pine_scripts) {
+      if (!existsSync(scriptPath)) continue;
+      const source = readFileSync(scriptPath, 'utf8');
+      await ensurePineEditorOpen();
+      await setSource({ source });
+      await smartCompile();
+      autoloaded_pine++;
+    }
+  }
+
+  return { success: true, symbol, chart_ready: ready, autoloaded_pine };
 }
 
 export async function setTimeframe({ timeframe, _deps }) {

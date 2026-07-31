@@ -442,23 +442,25 @@ export async function smartCompile() {
 
   const buttonClicked = await evaluate(`
     (function() {
+      // TV Desktop 3.x uses data-qa-id attributes (icon-only buttons, no visible text)
+      var addBtn = document.querySelector('[data-qa-id="add-script-to-chart"]:not([disabled])');
+      if (addBtn) { addBtn.click(); return 'Add to chart'; }
+
+      var updateBtn = document.querySelector('[data-qa-id="update-script-on-chart"]:not([disabled])');
+      if (updateBtn) { updateBtn.click(); return 'Update on chart'; }
+
+      // Legacy fallback: search by text content (older TV versions)
       var btns = document.querySelectorAll('button');
-      var addBtn = null;
-      var updateBtn = null;
-      var saveBtn = null;
+      var legacyAdd = null;
+      var legacyUpdate = null;
       for (var i = 0; i < btns.length; i++) {
         var text = btns[i].textContent.trim();
-        if (/save and add to chart/i.test(text)) {
-          btns[i].click();
-          return 'Save and add to chart';
-        }
-        if (!addBtn && /^add to chart$/i.test(text)) addBtn = btns[i];
-        if (!updateBtn && /^update on chart$/i.test(text)) updateBtn = btns[i];
-        if (!saveBtn && btns[i].className.indexOf('saveButton') !== -1 && btns[i].offsetParent !== null) saveBtn = btns[i];
+        if (/save and add to chart/i.test(text)) { btns[i].click(); return 'Save and add to chart'; }
+        if (!legacyAdd && /^add to chart$/i.test(text)) legacyAdd = btns[i];
+        if (!legacyUpdate && /^update on chart$/i.test(text)) legacyUpdate = btns[i];
       }
-      if (addBtn) { addBtn.click(); return 'Add to chart'; }
-      if (updateBtn) { updateBtn.click(); return 'Update on chart'; }
-      if (saveBtn) { saveBtn.click(); return 'Pine Save'; }
+      if (legacyAdd) { legacyAdd.click(); return 'Add to chart (legacy)'; }
+      if (legacyUpdate) { legacyUpdate.click(); return 'Update on chart (legacy)'; }
       return null;
     })()
   `);

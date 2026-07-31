@@ -2,6 +2,10 @@
 
 68 tools for reading and controlling a live TradingView Desktop chart via CDP (port 9222).
 
+## Clarifying questions before building
+
+When Anthony asks me to build, make, write, design, or implement a deliverable, ask **output-shaping questions first**, then build — using the `AskUserQuestion` tool. Only ask questions whose answer changes the output: scope, audience, format/medium, a key tradeoff, a must-have constraint, or the definition of "done." Lead each with my recommended default (marked "(Recommended)") so answering is a tap; if unanswered, proceed on defaults. Ask 1-3 at most, in one batch, at the start — never drip questions turn-by-turn. Do not ask what the code, files, git history, or memory can answer, and skip questions entirely for trivial edits, lookups, and already-fully-specified asks. Full rule lives in `~/.claude/CLAUDE.md`.
+
 ## Decision Tree — Which Tool When
 
 ### "What's on my chart right now?"
