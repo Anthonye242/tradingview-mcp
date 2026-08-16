@@ -4,8 +4,20 @@
 import { evaluate, evaluateAsync, KNOWN_PATHS, safeString } from '../connection.js';
 import { waitForChartReady } from '../wait.js';
 
+// Alias so the strategy-settle loop can take an injected evaluate in tests
+// while the rest of the module keeps using the import directly.
+const _evaluate = evaluate;
+
 const MAX_OHLCV_BARS = 500;
 const MAX_TRADES = 20;
+
+// Strategy report settling. A 60m/240m backtest over a long history can take
+// tens of seconds to recompute after a symbol switch — the old 6s budget
+// expired long before TradingView finished, so callers read a half-computed
+// (or previous-symbol) report.
+const STRATEGY_SETTLE_TIMEOUT_MS = 45000;
+const STRATEGY_POLL_INTERVAL_MS = 500;
+const STRATEGY_SETTLE_STABLE_POLLS = 3;
 
 // Round to 8 dp — enough to kill float noise (29899.999999997 → 29900) without
 // destroying precision on forex/crypto prices. The old 2-dp rounding flattened
@@ -212,8 +224,18 @@ export async function getIndicator({ entity_id }) {
 // Ensure the panel is open (via bottomWidgetBar), unhide any hidden
 // strategies, and wait for reportData to populate, so the strategy read tools
 // work even when the panel started closed or the strategy was hidden.
-// Returns { status, unhidden } — unhidden lists strategies made visible.
-async function ensureStrategyTesterReady(maxWaitMs = 6000) {
+// Returns { status, unhidden, symbol, resolution } — unhidden lists strategies
+// made visible.
+//
+// Settling, not just presence: the old loop broke out the moment reportData
+// exposed a `performance` object. After a symbol or timeframe change the
+// strategy source still carries the PREVIOUS symbol's computed report, so that
+// check passed on the very first poll and the caller was handed stale metrics
+// — which is what an external poller sees as a table that keeps changing and
+// never settles. Wait for the report's headline numbers to hold across
+// consecutive polls instead, so we return a figure TradingView is done
+// recomputing.
+export async function ensureStrategyTesterReady(maxWaitMs = STRATEGY_SETTLE_TIMEOUT_MS, { evaluate = _evaluate } = {}) {
   const unhidden = await evaluate(`
     (function() {
       ${FIND_STRATEGY_JS}
@@ -224,21 +246,61 @@ async function ensureStrategyTesterReady(maxWaitMs = 6000) {
       return unhideStrategies();
     })()
   `);
+
   const deadline = Date.now() + maxWaitMs;
   let status = 'timeout';
+  let lastSignature = null;
+  let stable = 0;
+  let context = null;
+
   while (Date.now() < deadline) {
-    const ready = await evaluate(`
+    const probe = await evaluate(`
       (function() {
         ${FIND_STRATEGY_JS}
+        var out = { state: 'pending' };
+        try {
+          var chart = ${CHART_API};
+          out.symbol = chart.symbol();
+          out.resolution = String(chart.resolution());
+        } catch (e) {}
         var f = findStrategy();
-        if (!f) return 'no-strategy';
-        return f.report && f.report.performance ? 'ready' : 'pending';
+        if (!f) { out.state = 'no-strategy'; return out; }
+        if (!f.report || !f.report.performance) return out;
+        var perf = f.report.performance, all = perf.all || {};
+        var orderCount = null;
+        try {
+          var o = f.strat.ordersData();
+          if (o && typeof o.value === 'function') o = o.value();
+          if (o && typeof o.length === 'number') orderCount = o.length;
+        } catch (e) {}
+        out.state = 'computed';
+        out.signature = [
+          all.netProfit, all.grossProfit, all.grossLoss,
+          all.numberOfWiningTrades, all.numberOfLosingTrades,
+          perf.maxStrategyDrawDown, orderCount
+        ].join('|');
+        return out;
       })()
     `);
-    if (ready === 'ready' || ready === 'no-strategy') { status = ready; break; }
-    await new Promise(r => setTimeout(r, 500));
+
+    if (probe && (probe.symbol || probe.resolution)) context = { symbol: probe.symbol, resolution: probe.resolution };
+
+    if (probe?.state === 'no-strategy') { status = 'no-strategy'; break; }
+
+    if (probe?.state === 'computed') {
+      if (probe.signature === lastSignature) stable++;
+      else { stable = 0; lastSignature = probe.signature; }
+      if (stable >= STRATEGY_SETTLE_STABLE_POLLS) { status = 'ready'; break; }
+    } else {
+      // Report vanished / not computed yet — any stability seen so far is void.
+      stable = 0;
+      lastSignature = null;
+    }
+
+    await new Promise(r => setTimeout(r, STRATEGY_POLL_INTERVAL_MS));
   }
-  return { status, unhidden: unhidden || [] };
+
+  return { status, unhidden: unhidden || [], symbol: context?.symbol ?? null, resolution: context?.resolution ?? null };
 }
 
 export async function getStrategyResults() {
@@ -282,12 +344,18 @@ export async function getStrategyResults() {
       } catch(e) { return {metrics: {}, source: 'internal_api', error: e.message}; }
     })()
   `);
+  const settled = ready.status === 'ready';
   return {
-    success: Object.keys(results?.metrics || {}).length > 0,
+    success: Object.keys(results?.metrics || {}).length > 0 && settled,
     metric_count: Object.keys(results?.metrics || {}).length,
     strategy: results?.strategy, currency: results?.currency, source: results?.source,
+    // The symbol/resolution the report was read under, so a caller driving a
+    // multi-symbol run can confirm it isn't looking at the previous leg.
+    symbol: ready.symbol, resolution: ready.resolution,
+    settled,
     metrics: results?.metrics || {},
     ...(ready.unhidden.length && { unhidden_strategies: ready.unhidden, note: 'Strategy was hidden on the chart; it was made visible so the report could compute.' }),
+    ...(ready.status === 'timeout' && { warning: `Strategy report was still recomputing after ${Math.round(STRATEGY_SETTLE_TIMEOUT_MS / 1000)}s; these metrics may be mid-calculation.` }),
     error: results?.error,
   };
 }
@@ -331,7 +399,10 @@ export async function getTrades({ max_trades } = {}) {
     success: (trades?.trades?.length || 0) > 0,
     trade_count: trades?.trades?.length || 0, total_orders: trades?.total_orders ?? 0,
     source: trades?.source, trades: trades?.trades || [],
+    symbol: ready.symbol, resolution: ready.resolution,
+    settled: ready.status === 'ready',
     ...(ready.unhidden.length && { unhidden_strategies: ready.unhidden, note: 'Strategy was hidden on the chart; it was made visible so orders could compute.' }),
+    ...(ready.status === 'timeout' && { warning: `Strategy orders were still recomputing after ${Math.round(STRATEGY_SETTLE_TIMEOUT_MS / 1000)}s; this list may be incomplete.` }),
     error: trades?.error,
   };
 }

@@ -117,6 +117,8 @@ These tools can return large payloads. Follow these rules to avoid context bloat
 ## Tool Conventions
 
 - All tools return `{ success: true/false, ... }`
+- `chart_set_symbol` / `chart_set_timeframe` report what actually took: `success` reflects the read-back `actual_symbol` / `actual_timeframe`, and `chart_ready` separately says whether bar data finished streaming. `success: true, chart_ready: false` means the switch worked but reads may be incomplete — retry the read, don't retry the switch.
+- `data_get_strategy_results` / `data_get_trades` return `settled` plus the `symbol`/`resolution` the report was read under. `settled: false` means TradingView was still recomputing — the numbers are mid-calculation, not final. On a multi-symbol run, check `symbol` matches the leg you asked for before recording the result.
 - Entity IDs (from `chart_get_state`) are session-specific — don't cache across sessions
 - Pine indicators must be **visible** on chart for pine graphics tools to read their data
 - `chart_manage_indicator` requires **full indicator names**: "Relative Strength Index" not "RSI", "Moving Average Exponential" not "EMA", "Bollinger Bands" not "BB"

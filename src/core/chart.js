@@ -2,7 +2,7 @@
  * Core chart control logic.
  */
 import { evaluate as _evaluate, evaluateAsync as _evaluateAsync, safeString, requireFinite } from '../connection.js';
-import { waitForChartReady as _waitForChartReady } from '../wait.js';
+import { waitForChartReady as _waitForChartReady, normalizeResolution, symbolMatches } from '../wait.js';
 import { readFileSync, existsSync } from 'fs';
 import { resolve as resolvePath, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -43,17 +43,34 @@ export async function getState({ _deps } = {}) {
 }
 
 export async function setSymbol({ symbol, _deps }) {
-  const { evaluateAsync, waitForChartReady } = _resolve(_deps);
+  const { evaluate, evaluateAsync, waitForChartReady } = _resolve(_deps);
+  // setSymbol's second argument is a completion callback — the old `{}` was
+  // never callable, so this resolved on a blind 500ms timer. Resolve on the
+  // callback when the build honours it, with the timer only as a fallback.
   await evaluateAsync(`
     (function() {
       var chart = ${CHART_API};
       return new Promise(function(resolve) {
-        chart.setSymbol(${safeString(symbol)}, {});
-        setTimeout(resolve, 500);
+        var done = false;
+        function finish() { if (!done) { done = true; resolve(); } }
+        try { chart.setSymbol(${safeString(symbol)}, finish); }
+        catch (e) { try { chart.setSymbol(${safeString(symbol)}, {}); } catch (e2) {} }
+        setTimeout(finish, 3000);
       });
     })()
   `);
   const ready = await waitForChartReady(symbol);
+
+  // Read back what the chart actually landed on. Reporting success:true
+  // unconditionally meant a symbol that silently failed to resolve looked
+  // identical to one that loaded.
+  const actual = await evaluate(`
+    (function() {
+      try { var chart = ${CHART_API}; return { symbol: chart.symbol(), resolution: String(chart.resolution()) }; }
+      catch (e) { return null; }
+    })()
+  `);
+  const applied = actual?.symbol ? symbolMatches(actual.symbol, symbol) : false;
 
   // Re-inject Pine scripts listed in autoload.json after every symbol switch
   let autoloaded_pine = 0;
@@ -70,7 +87,18 @@ export async function setSymbol({ symbol, _deps }) {
     }
   }
 
-  return { success: true, symbol, chart_ready: ready, autoloaded_pine };
+  return {
+    success: applied,
+    symbol,
+    actual_symbol: actual?.symbol ?? null,
+    chart_ready: ready,
+    autoloaded_pine,
+    // `applied` and `chart_ready` are separate on purpose: a symbol can be
+    // correctly set while history is still streaming (ready=false), and that
+    // is a retry-the-read situation, not a failed symbol change.
+    ...(applied && !ready && { warning: 'Symbol applied but bar data had not settled within the readiness timeout — reads may be incomplete.' }),
+    ...(!applied && { error: `Symbol change to ${symbol} did not take; chart is on ${actual?.symbol ?? 'unknown'}.` }),
+  };
 }
 
 export async function setTimeframe({ timeframe, _deps }) {
@@ -82,7 +110,22 @@ export async function setTimeframe({ timeframe, _deps }) {
     })()
   `);
   const ready = await waitForChartReady(null, timeframe);
-  return { success: true, timeframe, chart_ready: ready };
+
+  const actual = await evaluate(`
+    (function() {
+      try { return String(${CHART_API}.resolution()); } catch (e) { return null; }
+    })()
+  `);
+  const applied = actual != null && normalizeResolution(actual) === normalizeResolution(timeframe);
+
+  return {
+    success: applied,
+    timeframe,
+    actual_timeframe: actual ?? null,
+    chart_ready: ready,
+    ...(applied && !ready && { warning: 'Timeframe applied but bar data had not settled within the readiness timeout — reads may be incomplete.' }),
+    ...(!applied && { error: `Timeframe change to ${timeframe} did not take; chart is on ${actual ?? 'unknown'}.` }),
+  };
 }
 
 export async function setType({ chart_type, _deps }) {
